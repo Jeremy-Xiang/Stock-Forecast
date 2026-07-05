@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+plots/*.png
+!plots/.gitkeep
+cache/

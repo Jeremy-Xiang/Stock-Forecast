@@ -1,0 +1,17 @@
+ticker,model,mae,rmse,directional_accuracy
+AAPL,Naive (persistence),1.866669661150219,2.3763644585907704,0.0
+AAPL,Transition matrix (linear dynamical system),1.8676898538507043,2.3769320277347825,0.496
+AAPL,Linear Regression (lag features),1.8978673378745452,2.406819667221676,0.47
+AAPL,Random Forest (lag features),2.2349731082344566,2.8022229779732983,0.502
+MSFT,Naive (persistence),3.7791593762663056,4.865381264501967,0.0
+MSFT,Transition matrix (linear dynamical system),3.802142873442485,4.892695390969875,0.47
+MSFT,Linear Regression (lag features),3.8228954191999756,4.907220357669005,0.48
+MSFT,Random Forest (lag features),4.752315067720112,6.443906718926704,0.492
+XOM,Naive (persistence),3.840168142197354,4.748131473731269,0.0
+XOM,Transition matrix (linear dynamical system),3.841177051325013,4.7474632123253535,0.486
+XOM,Linear Regression (lag features),3.850385309184799,4.758079221566826,0.49
+XOM,Random Forest (lag features),4.142466828268818,5.157161150295666,0.492
+JNJ,Naive (persistence),2.64468871817671,3.3657406568482067,0.0
+JNJ,Transition matrix (linear dynamical system),2.639739537369792,3.362774729749083,0.518
+JNJ,Linear Regression (lag features),2.6570792182459315,3.385609286095948,0.506
+JNJ,Random Forest (lag features),27.5369490071256,35.209270533659414,0.494
