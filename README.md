@@ -1,151 +1,23 @@
 # stock-forecast-bench
 
-A walk-forward comparison of four one-step-ahead OHLC forecasting approaches,
-runnable on a single ticker or across a whole basket. Built around a
-transition-matrix idea from an earlier exploratory notebook, cleaned up and
-put on a level playing field against three standard baselines, then scaled
-from "one stock" to "every stock you actually care about."
-
-This is an educational/portfolio project, **not** a trading signal. Predicting
-next-day closing prices from price history alone is a famously hard problem;
-the point here is the methodology — clean walk-forward evaluation, transparent
-math, an honest comparison, and a basket mode that tells you whether a result
-generalizes or was just luck on one ticker.
+Compares four next-day OHLC forecasting models side by side under strict walk-forward validation — single ticker or a whole basket. The baseline is naive persistence (tomorrow = today), and every other model has to beat it. Two of them don't.
 
 ## The four models
 
-| Model | Idea |
-|---|---|
-| **Naive (persistence)** | Tomorrow's OHLC = today's OHLC. The standard random-walk baseline every other model has to beat. |
-| **Transition matrix** | A linear dynamical system fit to the whole training window (see math below). |
-| **Linear Regression** | Multi-output linear regression on a small lag-feature set. |
-| **Random Forest** | Multi-output random forest on the same lag-feature set. |
+Four models, one interface (`fit`, `predict_next`, `predict_series`):
 
-### The transition matrix model
+- **Naive persistence** — tomorrow's OHLC = today's. Every other model is measured against this.
+- **Transition matrix** — a 4×4 linear map fit by least squares, treating [Open, High, Low, Close] as a state vector. `x_(t+1) ≈ x_t · T`, where `T` minimizes `‖X1 − X0·T‖²`. The original notebook computed many small local matrices and averaged them — numerically fragile because some 4-day windows are near-singular. Here we solve for one `T` across the full training window. Multi-day forecasts via `T^k`.
+- **Linear regression** — multi-output OLS on 5 days of lagged OHLC plus a 5-day rolling mean/std of close.
+- **Random forest** — same feature set. 300 trees, `max_depth=7`, time-series cross-validation.
 
-Represent each day as a state vector of its four prices:
+## How evaluation works
 
-```
-x_t = [Open_t, High_t, Low_t, Close_t]   ∈ R^4
-```
+All four models train once on the first 80% of price history. The remaining 20% is evaluated one step ahead: each forecast uses only the true price history before that day, never anything from the test window. No refitting during evaluation.
 
-The model assumes a *fixed linear map* `T` (a 4×4 matrix) that approximately
-advances the state by one day:
+Metrics: MAE and RMSE on closing price (dollars), and directional accuracy (did the model call the daily move direction correctly). Naive persistence always predicts zero change, so its directional accuracy is 0% by construction — not because it's bad, just because "no change" can't match a real non-zero move. Use MAE/RMSE to compare it.
 
-```
-x_(t+1) ≈ x_t · T
-```
-
-Given a training window with `n` days, stack the states into two matrices —
-`X0` (days `0..n-2`) and `X1` (days `1..n-1`, i.e. `X0` shifted forward by one
-day). The best-fit `T` minimizes:
-
-```
-‖X1 − X0·T‖²
-```
-
-which is solved directly with ordinary least squares (`numpy.linalg.lstsq`).
-This is the cleaned-up version of the original notebook's approach, which
-estimated many small local 4×4 transition matrices (one per 4-day window) by
-explicitly inverting each `X0` block and averaging the results — numerically
-fragile, since some of those small windows are close to singular. Here we
-solve for the single best `T` across the *entire* training set in one stable
-least-squares fit. Same underlying idea (a Markov-style linear transition
-between consecutive states), estimated more robustly.
-
-Once fit, a forecast is `x_t · T`. For a `k`-day-ahead forecast, apply the
-matrix power: `x_t · T^k` — the part of the original notebook that was
-already a genuine Markov-chain technique (repeated application of a fixed
-transition operator) carries over unchanged
-(`TransitionMatrixModel.predict_k_steps`).
-
-### Linear Regression & Random Forest
-
-Both use the same hand-built feature set: the flattened OHLC values from the
-last 5 trading days, plus the 5-day rolling mean and standard deviation of
-the close. The target is next-day OHLC.
-
-## Evaluation methodology
-
-All four models are fit **once**, on the first 80% of the price history
-(`train_frac=0.8`, configurable). They are then evaluated **one step ahead**
-on the remaining 20%: every test-day forecast uses only true price history
-from strictly before that day. No model is refit during the test window.
-
-Metrics reported:
-- **MAE / RMSE** on closing price (in dollars)
-- **Directional accuracy** — did the model get the up/down move right,
-  relative to the previous day's *actual* close?
-
-> **Note on directional accuracy:** naive persistence always predicts "no
-> change," so its predicted direction is flat (0), which can never match a
-> real, non-zero daily move. It will show ~0% directional accuracy *by
-> construction*, not because it's an unusually bad model. MAE/RMSE are the
-> fair comparison for that baseline.
-
-## Two real bugs found while building this
-
-Worth documenting since they're the kind of thing that's easy to get subtly
-wrong in any walk-forward backtest, not just this one:
-
-1. **O(n²) backtest loop.** The first version called `predict_next()` once
-   per test day, and for the regression-based models that meant rebuilding
-   the entire lag-feature matrix from scratch on every call. Fine for one
-   ticker, painfully slow across a basket (~3 minutes for 4 tickers). Fixed
-   by recognizing that none of the four models ever feed a prior prediction
-   back in as the next day's input — they're all pure functions of *true*
-   history — so the whole test window can be forecast in a single vectorized
-   batch call (`predict_series()`) instead of a day-by-day loop.
-2. **Off-by-one feature alignment.** While restructuring for the fix above, a
-   second, independent bug turned up: `predict_next()`'s feature-building
-   step required a known "next day" target to exist in the data it was
-   given, which it doesn't for an actual live forecast — so it was silently
-   producing a prediction *for the last day already in history*, using lag
-   data from one day further back than intended. It happened to validate
-   internally (it ran without error, returned a plausible-looking price) — it
-   just wasn't predicting the day it claimed to. This only affected Linear
-   Regression and Random Forest (Naive and the transition matrix model index
-   directly into the last row and never had this problem). Fixed with a
-   dedicated `build_latest_feature_vector()` that doesn't require a target
-   row. Verified by checking `predict_next()` and `predict_series()` agree
-   exactly on overlapping dates (they now match to floating-point precision).
-
-The lesson generalizes: a model that runs cleanly and returns a
-reasonable-looking number is not the same as a model that's predicting the
-day you think it's predicting. Worth an explicit equality check between any
-"live" and "batch" prediction path before trusting either.
-
-## Running it
-
-```bash
-pip install -r requirements.txt
-
-# Single ticker — detailed per-model prediction plots
-python run_comparison.py --tickers AAPL
-
-# Basket mode — cross-ticker ranking (2+ tickers triggers this automatically)
-python run_comparison.py --tickers AAPL,MSFT,GOOGL,AMZN,JPM,XOM,JNJ,TSLA
-
-# Built-in sector-diverse default basket (13 tickers)
-python run_comparison.py --basket
-
-# Your own list from a file, one ticker per line — e.g. your full
-# 53-ticker THESIS universe
-python run_comparison.py --tickers-file my_tickers.txt
-```
-
-This pulls live daily OHLC data via `yfinance`. If it can't reach the
-network (e.g. a sandboxed CI environment), `src/data.py` falls back to a
-reproducible synthetic OHLC series so the pipeline still runs end to end —
-useful for testing, never for real conclusions about a stock.
-
-**Runtime:** Random Forest's `fit()` is the dominant cost (~5-6s per
-ticker on ~2,000 training rows with 300 trees). Budget roughly that per
-ticker — a 53-ticker basket takes on the order of 5 minutes. Reduce
-`n_estimators` in `src/models.py` if you want faster iteration at some cost
-to RF accuracy.
-
-## Single-ticker mode output
+## Results
 
 ```
 Model                                    MAE ($)  RMSE ($)   Dir. Acc.
@@ -156,95 +28,44 @@ Linear Regression (lag features)           1.229     1.541       49.2%
 Random Forest (lag features)               1.850     2.618       48.4%
 ```
 
-Saves `plots/model_comparison.png` (actual vs. predicted close, per model)
-and `plots/metric_comparison.png` (bar charts across all four).
+Basket mode adds cross-ticker ranking columns (average MAE rank, win rate per model). Saves `basket_results.csv` for your own slicing.
 
-## Basket mode output
+The result that holds across every run: Random Forest is consistently the worst. Tree-based models can't extrapolate past their training range — when a stock trends outside the prices it was trained on, RF predictions flatline at the boundary. This shows up as the wide error bars in `basket_mae_boxplot.png` and is visible directly in `model_comparison.png`'s bottom-right panel. It's a structural property of the model class, not a tuning issue.
 
-```
-Model                                    Avg MAE  Avg RMSE  Avg Dir.Acc  Avg Rank  Win Rate
--------------------------------------------------------------------------------------------
-Naive (persistence)                        4.363     5.527         0.0%      1.54     46.2%
-Transition matrix (linear dynamical system) 4.363     5.532        49.7%      1.62     46.2%
-Linear Regression (lag features)           4.400     5.570        50.1%      2.85      7.7%
-Random Forest (lag features)              24.442    30.764        49.2%      4.00      0.0%
-```
+## Two bugs found during development
 
-Saves `plots/basket_results.csv` (every ticker × model result, for your own
-slicing), `plots/basket_mae_boxplot.png` (MAE spread per model across the
-whole basket), and `plots/basket_win_rate.png` (how often each model had the
-lowest MAE for a given ticker).
+**O(n²) backtest loop.** The first version called `predict_next()` once per test day. For the regression models, each call rebuilt the entire lag-feature matrix from scratch, turning a single-ticker backtest into an O(n²) operation. Three minutes for four tickers. Fixed by recognizing that none of the four models feed prior predictions back as input — they're all pure functions of true history — so the test window can be forecast in one vectorized batch call (`predict_series()`) instead of a loop.
 
-**Takeaways that hold up across runs, single-ticker or basket:**
-- Naive persistence and the transition matrix track each other almost
-  exactly on MAE/RMSE — a single global linear map over OHLC space ends up
-  close to "today predicts tomorrow" for a near-random-walk series like
-  daily stock prices. The transition matrix's value-add is directional edge
-  and clean multi-step (`T^k`) forecasting, not point-forecast accuracy.
-- Random Forest's MAE/RMSE are consistently the worst, and its *spread*
-  across tickers is wide — a handful of tickers with strong trends blow up
-  its error (see `basket_mae_boxplot.png`). This is a structural property:
-  tree-based models can't extrapolate beyond the price range they were
-  trained on. When a stock moves past its training-period high or low, RF's
-  prediction flattens out near that boundary instead of following the price
-  (visible directly in `plots/model_comparison.png`'s bottom-right panel).
-  Worth knowing before reaching for RF on any trending series.
-- More parameters didn't buy more accuracy here. That's the textbook outcome
-  for next-day stock price forecasting from price history alone — a
-  genuinely useful negative result, not a bug.
+**Off-by-one feature alignment.** While restructuring for the fix above, a second bug surfaced: `predict_next()`'s feature builder required a known "next day" target row to exist in the data it was given. For an actual live forecast, there is no next day yet — so it was silently forecasting the *last day already in history*, using lag data from a day further back than intended. It ran without errors and returned plausible-looking prices. That's the failure mode: not a crash, just the wrong day. Fixed with `build_latest_feature_vector()`, which constructs a feature row from the raw tail of history without needing a target. Verified by checking `predict_next()` and `predict_series()` agree to floating-point precision on overlapping dates.
 
-## Project structure
+A model that runs cleanly and returns a plausible number is not the same as a model predicting the day you think it is.
 
-```
-stock-forecast-bench/
-├── run_comparison.py      # entry point — single-ticker or basket mode
-├── src/
-│   ├── data.py            # yfinance loader (+ offline synthetic fallback)
-│   ├── models.py          # the four models
-│   ├── backtest.py        # walk-forward evaluation + metrics
-│   └── aggregate.py       # cross-ticker basket runner + ranking
-├── plots/                 # generated comparison plots + basket_results.csv
-└── requirements.txt
-```
-
-## Serving this from a dashboard (cache-first API)
-
-`app.py` wraps the backtest in a FastAPI service designed for exactly the
-constraint a free-tier host like Render puts on you: Random Forest's
-`fit()` takes ~5-6s per ticker, which is too slow to redo on every page
-load, especially after a cold start.
-
-The pattern:
-- An APScheduler cron job (`precompute_tickers()`) runs once a day,
-  computing all four models for every ticker in your universe and writing
-  the result to a small JSON cache (`src/cache.py`).
-- Every `GET /forecast/{ticker}` request reads from that cache — no model
-  fitting on the request path.
-- First request for a ticker that isn't cached yet (or whose cache entry
-  is stale) computes it once, synchronously, caches it, and every
-  subsequent request for that ticker is a cache hit until the next
-  scheduled refresh. Slow once, fast after — the standard cache warm-up
-  tradeoff, not a special case to handle.
+## Running it
 
 ```bash
-uvicorn app:app --reload --port 8002
-curl http://localhost:8002/health
-curl http://localhost:8002/forecast/AAPL
-curl -X POST http://localhost:8002/admin/refresh -H "Content-Type: application/json" -d '["AAPL","MSFT"]'
+pip install -r requirements.txt
+
+python run_comparison.py --tickers AAPL               # single ticker, per-model plots
+python run_comparison.py --tickers AAPL,MSFT,XOM,JNJ  # basket mode, cross-ticker ranking
+python run_comparison.py --basket                      # built-in 13-ticker universe
+python run_comparison.py --tickers-file my_tickers.txt # your own list, one per line
 ```
 
-`/forecast/{ticker}` returns JSON (dates + actual/predicted close + metrics
-per model) — built for a `ComposedChart` in Recharts, not for re-parsing a
-matplotlib PNG.
+yfinance pulls live OHLCV data. If the network's unavailable (sandboxed CI, etc.), `src/data.py` falls back to a deterministic synthetic series labeled as such.
 
-To mount this under THESIS's existing FastAPI app instead of running a
-second service: copy `src/cache.py`, `src/precompute.py`, and the route
-handlers in `app.py` in as a router (`app.include_router(...)`), point
-`DEFAULT_TICKERS` at your real 53-ticker universe via the
-`FORECAST_TICKERS` env var, and reuse THESIS's existing scheduler if it
-already runs one (one cron scheduler per process is plenty — no need for
-this module's `BackgroundScheduler` *and* THESIS's APScheduler instance
-both running).
+Random Forest's `fit()` dominates runtime — about 5-6s per ticker on 2,000 training rows. A 53-ticker basket takes roughly 5 minutes. Drop `n_estimators` in `src/models.py` if you need faster iteration.
+
+## Cache-first API
+
+`app.py` is a FastAPI wrapper for use cases where the results need to be served over HTTP (e.g. a React dashboard). Random Forest is too slow to refit per request, so an APScheduler cron job precomputes every ticker nightly and writes results to a JSON cache. `GET /forecast/{ticker}` reads from cache; the first request for an uncached ticker computes synchronously, then caches for all subsequent requests.
+
+```bash
+uvicorn app:app --port 8002
+curl http://localhost:8002/forecast/AAPL
+curl -X POST http://localhost:8002/admin/refresh -d '["AAPL","MSFT"]'
+```
+
+Response shape is `{dates, actual_close, predicted_close, mae, rmse}` per model — ready for a Recharts `ComposedChart`.
 
 ## Running the tests
 
@@ -252,18 +73,20 @@ both running).
 pytest tests/ -v
 ```
 
-The suite pins the behaviors that actually caught bugs during development
-(see the sections above), not ceremony coverage — every test encodes a
-check where the wrong answer was at some point the actual behavior.
+Six tests. Every one encodes a check where the wrong answer was, at some point, the actual behavior.
 
-## Possible next steps
+## Structure
 
-- Wire this into a proper backtest module inside the THESIS dashboard
-  (Sharpe ratio, max drawdown, per-theme breakdown) rather than a standalone
-  script.
-- Add a Markov *regime* classifier (e.g. via clustering rolling volatility
-  and trend features into discrete states) and fit a separate transition
-  matrix per regime, instead of one matrix for the whole series.
-- Extend the lag-feature set with the sentiment scores already computed in
-  THESIS, to see whether they actually move the needle on the regression
-  models' error.
+```
+stock-forecast-bench/
+├── run_comparison.py   # CLI: single-ticker or basket mode
+├── app.py              # FastAPI service with caching layer
+├── src/
+│   ├── models.py       # the four models
+│   ├── backtest.py     # walk-forward evaluation
+│   ├── aggregate.py    # cross-ticker basket runner + ranking
+│   ├── cache.py        # JSON cache for the API
+│   ├── precompute.py   # nightly precompute job
+│   └── data.py         # yfinance loader + synthetic fallback
+└── tests/test_core.py
+```
