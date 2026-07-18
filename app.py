@@ -20,10 +20,11 @@ Mount under THESIS's existing FastAPI app for production (see README).
 from __future__ import annotations
 
 import os
+import secrets
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.cache import get_cached_ticker, load_cache
@@ -34,6 +35,21 @@ from src.precompute import precompute_tickers
 # or a call into THESIS's existing ticker list rather than a constant here).
 DEFAULT_TICKERS = os.environ.get("FORECAST_TICKERS", "AAPL,MSFT,GOOGL,AMZN,NVDA,JPM,XOM,JNJ,PG,TSLA").split(",")
 PRECOMPUTE_HOUR = int(os.environ.get("FORECAST_PRECOMPUTE_HOUR", "2"))  # 2am server time, low-traffic
+
+# Comma-separated allowlist of browser origins, e.g. "https://thesis.jeremyxiang.com".
+# Falls back to "*" for local dev; set it in production to lock the API to your frontend.
+ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+
+# Shared secret guarding /admin/*. Unset => admin routes are disabled (fail closed),
+# so an anonymous caller can never kick off an expensive recompute.
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")
+
+
+def _require_admin(token: str | None) -> None:
+    if not ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="Admin endpoints disabled: set ADMIN_TOKEN to enable them.")
+    if not token or not secrets.compare_digest(token, ADMIN_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Admin-Token.")
 
 scheduler = BackgroundScheduler()
 
@@ -65,7 +81,7 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="THESIS Forecast API", version="1.0", lifespan=_lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/health")
@@ -98,8 +114,9 @@ def get_forecast(ticker: str, max_age_hours: float = 24.0):
 
 
 @app.post("/admin/refresh")
-def refresh(tickers: list[str] | None = None):
+def refresh(tickers: list[str] | None = None, x_admin_token: str | None = Header(default=None)):
     """Manually trigger a recompute — useful for a 'refresh data' button in the UI."""
+    _require_admin(x_admin_token)
     target = [t.upper() for t in tickers] if tickers else DEFAULT_TICKERS
     results = precompute_tickers(target)
     return {"refreshed": list(results.keys())}
